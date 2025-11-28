@@ -72,6 +72,16 @@ jobs:
 
           sudo systemctl restart xrdp
 
+      - name: Fix KDE config permissions
+        run: |
+          set -eux
+          # Make sure ~/.config/ksplashrc exists and is writable
+          for U in "$DESKTOP_USER" runner; do
+            if id "$U" >/dev/null 2>&1; then
+              sudo -u "$U" bash -lc 'mkdir -p ~/.config && touch ~/.config/ksplashrc'
+            fi
+          done
+
       - name: Install dev stack (PostgreSQL, Redis, Python, Firefox) + hook Docker user
         run: |
           set -eux
