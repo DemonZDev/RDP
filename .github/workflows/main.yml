@@ -19,22 +19,161 @@ jobs:
             xfce4 xfce4-goodies xfce4-session \
             xrdp xorg xorgxrdp dbus-x11
 
-          # xrdp needs ssl-cert group
           sudo adduser xrdp ssl-cert || true
 
-          # Force xrdp to start XFCE instead of default Xsession
-          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
-
-          sudo bash -lc 'cat > /etc/xrdp/startwm.sh << "EOF"
-          #!/bin/sh
-          if [ -r /etc/profile ]; then
-            . /etc/profile
-          fi
-          export XDG_CONFIG_DIRS=/etc/xdg
-          startxfce4
-          EOF'
-
+          # Force xrdp to start XFCE instead of the default
+          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak || true
+          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+#!/bin/sh
+if [ -r /etc/profile ]; then
+  . /etc/profile
+fi
+export XDG_CONFIG_DIRS=/etc/xdg
+startxfce4
+EOF
           sudo chmod +x /etc/xrdp/startwm.sh
+
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+      - name: Create godhyena user with sudo
+        run: |
+          set -eux
+          USERNAME="godhyena"
+
+          if ! id "$USERNAME" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash "$USERNAME"
+          fi
+
+          PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
+          echo "$USERNAME:$PASSWORD" | sudo chpasswd
+          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME" >/dev/null
+          sudo usermod -aG ssl-cert "$USERNAME" || true
+
+          echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
+          echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Configure XFCE session for users
+        run: |
+          set -eux
+
+          # helper to create ~/.xsession for a user
+          make_session() {
+            U="$1"
+            if id "$U" >/dev/null 2>&1; then
+              sudo -u "$U" bash -lc 'printf "%s\n" "#!/bin/bash" "export XDG_CONFIG_DIRS=/etc/xdg" "startxfce4" > ~/.xsession && chmod +x ~/.xsession'
+            fi
+          }
+
+          make_session runner
+          make_session "$DESKTOP_USER"
+
+      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox, Docker group fix)
+        run: |
+          set -eux
+          sudo apt-get update
+
+          # docker group for non-root usage
+          if getent group docker >/dev/null 2>&1; then
+            sudo usermod -aG docker "$DESKTOP_USER" || true
+          fi
+
+          sudo apt-get install -y postgresql postgresql-contrib
+          sudo apt-get install -y redis-server
+          sudo apt-get install -y python3 python3-pip python3-venv
+          sudo apt-get install -y firefox
+
+      - name: Install Node.js 20 + Yarn
+        run: |
+          set -eux
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          sudo npm i -g yarn@1.22.22
+
+      - name: Install JDK 21 + Maven
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jdk maven
+          java -version
+          mvn -version
+
+      - name: Install Google Chrome
+        run: |
+          set -eux
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          rm google-chrome-stable_current_amd64.deb
+
+      - name: Install Google Antigravity
+        run: |
+          set -eux
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
+
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
+            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+
+      - name: Install Tailscale
+        run: |
+          set -eux
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo systemctl enable --now tailscaled
+
+      - name: Bring Tailscale up (Login URL mode)
+        run: |
+          set -eux
+
+          sudo tailscale up \
+            --hostname="gh-xfce-${GITHUB_RUN_ID}" \
+            --reset 2>&1 | tee /tmp/ts.txt || true
+
+          echo ""
+          echo "===== TAILSCALE LOGIN ====="
+          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/ts.txt || \
+            echo "No login URL found."
+          echo "==========================="
+          echo ""
+
+          TS_IP=""
+          for i in $(seq 1 20); do
+            TS_IP=$(tailscale ip -4 | head -n 1 || true)
+            if [ -n "$TS_IP" ]; then
+              break
+            fi
+            sleep 6
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "No Tailscale IPv4 address found!" >&2
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      - name: Show RDP login details & keep alive
+        run: |
+          echo ""
+          echo "========== UBUNTU XFCE RDP =========="
+          echo "IP           : $TAILSCALE_IP"
+          echo "User         : $DESKTOP_USER"
+          echo "Password     : $DESKTOP_PASSWORD"
+          echo "Port         : 3389"
+          echo "====================================="
+          echo ""
+          echo "Connect with any RDP client to:"
+          echo "  ${TAILSCALE_IP}:3389 as ${DESKTOP_USER}"
+          echo ""
+
+          while true
+          do
+            echo "[$(date)] XFCE session running..."
+            sleep 300
+          done          sudo chmod +x /etc/xrdp/startwm.sh
 
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
