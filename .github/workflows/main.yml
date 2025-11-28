@@ -13,9 +13,29 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
+
+          # Desktop + XRDP + Xorg
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xrdp dbus-x11
+            xfce4 xfce4-goodies xfce4-session \
+            xrdp xorg xorgxrdp dbus-x11
+
+          # xrdp needs ssl-cert group
           sudo adduser xrdp ssl-cert || true
+
+          # Force xrdp to start XFCE instead of default Xsession
+          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
+
+          sudo bash -lc 'cat > /etc/xrdp/startwm.sh << "EOF"
+          #!/bin/sh
+          if [ -r /etc/profile ]; then
+            . /etc/profile
+          fi
+          export XDG_CONFIG_DIRS=/etc/xdg
+          startxfce4
+          EOF'
+
+          sudo chmod +x /etc/xrdp/startwm.sh
+
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
@@ -36,21 +56,37 @@ jobs:
           echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
           echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Set XFCE default for XRDP
+      - name: Configure XFCE session for users
         run: |
           set -eux
-          echo "startxfce4" | sudo tee /etc/skel/.xsession
-          echo "startxfce4" | sudo tee /home/$DESKTOP_USER/.xsession
-          sudo chown $DESKTOP_USER:$DESKTOP_USER /home/$DESKTOP_USER/.xsession
+
+          make_session() {
+            local U="$1"
+            if id "$U" >/dev/null 2>&1; then
+              sudo -u "$U" bash -lc 'cat > ~/.xsession <<EOF
+#!/bin/bash
+export XDG_CONFIG_DIRS=/etc/xdg
+startxfce4
+EOF
+chmod +x ~/.xsession
+'
+            fi
+          }
+
+          # Ensure both runner and godhyena have a correct session script
+          make_session "runner"
+          make_session "$DESKTOP_USER"
 
       - name: Install dev stack (PostgreSQL, Redis, Python, Firefox, Docker group fix)
         run: |
           set -eux
           sudo apt-get update
 
+          # hook docker group
           if getent group docker >/dev/null 2>&1; then
             sudo usermod -aG docker "$DESKTOP_USER" || true
           fi
+
           sudo apt-get install -y postgresql postgresql-contrib
           sudo apt-get install -y redis-server
           sudo apt-get install -y python3 python3-pip python3-venv
@@ -58,26 +94,42 @@ jobs:
 
       - name: Install Node.js 20 + Yarn
         run: |
+          set -eux
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           sudo apt-get install -y nodejs
           sudo npm i -g yarn@1.22.22
 
       - name: Install JDK 21 + Maven
         run: |
+          set -eux
           sudo apt-get update
-          sudo apt-get install -y maven
-          sudo apt-get install -y openjdk-21-jdk
+          sudo apt-get install -y openjdk-21-jdk maven
           java -version
           mvn -version
 
       - name: Install Google Chrome
         run: |
+          set -eux
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
           rm google-chrome-stable_current_amd64.deb
 
+      - name: Install Google Antigravity
+        run: |
+          set -eux
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
+
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
+            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+
       - name: Install Tailscale
         run: |
+          set -eux
           curl -fsSL https://tailscale.com/install.sh | sudo sh
           sudo systemctl enable --now tailscaled
 
@@ -122,8 +174,8 @@ jobs:
           echo "Port         : 3389"
           echo "====================================="
           echo ""
-          echo "Connect with:"
-          echo "xfce session login = OK"
+          echo "Connect with any RDP client to:"
+          echo "  ${TAILSCALE_IP}:3389 as ${DESKTOP_USER}"
           echo ""
 
           while true
