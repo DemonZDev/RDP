@@ -1,37 +1,27 @@
-name: Ubuntu KDE RDP
+name: Ubuntu XFCE RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  ubuntu-kde-rdp:
+  ubuntu-xfce-rdp:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: Update apt & install KDE Plasma + XRDP
+      - name: Install XFCE + XRDP
         run: |
           set -eux
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-
-          # KDE Plasma desktop + XRDP + basic tools
+          sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            kde-plasma-desktop xrdp xorg dbus-x11 \
-            software-properties-common curl wget gnupg lsb-release ca-certificates
-
-          # Fix cursor issues in xrdp
-          if grep -q '^new_cursors=true' /etc/xrdp/xrdp.ini; then
-            sudo sed -i 's/^new_cursors=true/new_cursors=false/' /etc/xrdp/xrdp.ini
-          fi
-
+            xfce4 xfce4-goodies xrdp dbus-x11
+          sudo adduser xrdp ssl-cert || true
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
       - name: Create godhyena user with sudo
         run: |
           set -eux
-
           USERNAME="godhyena"
 
           if ! id "$USERNAME" >/dev/null 2>&1; then
@@ -40,210 +30,104 @@ jobs:
 
           PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
           echo "$USERNAME:$PASSWORD" | sudo chpasswd
-
-          # sudo access (no password prompt, this is a temporary runner anyway)
           echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME" >/dev/null
-
-          # xrdp likes this group
           sudo usermod -aG ssl-cert "$USERNAME" || true
 
           echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
           echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Configure KDE Plasma session for XRDP
+      - name: Set XFCE default for XRDP
         run: |
           set -eux
+          echo "startxfce4" | sudo tee /etc/skel/.xsession
+          echo "startxfce4" | sudo tee /home/$DESKTOP_USER/.xsession
+          sudo chown $DESKTOP_USER:$DESKTOP_USER /home/$DESKTOP_USER/.xsession
 
-          USERNAME="$DESKTOP_USER"
-
-          sudo -u "$USERNAME" bash -lc '
-            echo "startplasma-x11" > ~/.xsession
-
-            D=/usr/share/plasma:/usr/local/share:/usr/share:/var/lib/snapd/desktop
-            C=/etc/xdg/xdg-plasma:/etc/xdg
-            C=${C}:/usr/share/kubuntu-default-settings/kf5-settings
-
-            cat > ~/.xsessionrc <<EOF
-            export XDG_SESSION_DESKTOP=KDE
-            export XDG_DATA_DIRS=${D}
-            export XDG_CONFIG_DIRS=${C}
-            EOF
-          '
-
-          sudo systemctl restart xrdp
-
-      - name: Fix KDE config permissions
+      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox, Docker group fix)
         run: |
           set -eux
+          sudo apt-get update
 
-          # Make sure ksplashrc exists and is writable for both runner and godhyena
-          # 1) runner (this is the one KDE is complaining about in your screenshot)
-          if id runner >/dev/null 2>&1; then
-            sudo mkdir -p /home/runner/.config
-            sudo touch /home/runner/.config/ksplashrc
-            sudo chown runner:runner /home/runner/.config /home/runner/.config/ksplashrc
-            sudo chmod 666 /home/runner/.config/ksplashrc
-          fi
-
-          # 2) desktop user (godhyena)
-          if id "$DESKTOP_USER" >/dev/null 2>&1; then
-            sudo mkdir -p "/home/$DESKTOP_USER/.config"
-            sudo touch "/home/$DESKTOP_USER/.config/ksplashrc"
-            sudo chown "$DESKTOP_USER:$DESKTOP_USER" "/home/$DESKTOP_USER/.config" "/home/$DESKTOP_USER/.config/ksplashrc"
-            sudo chmod 666 "/home/$DESKTOP_USER/.config/ksplashrc"
-          fi
-
-      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox) + hook Docker user
-        run: |
-          set -eux
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-
-          # Docker is ALREADY installed on GitHub runners.
-          # Just add user to docker group so it can run docker without sudo.
           if getent group docker >/dev/null 2>&1; then
             sudo usermod -aG docker "$DESKTOP_USER" || true
           fi
+          sudo apt-get install -y postgresql postgresql-contrib
+          sudo apt-get install -y redis-server
+          sudo apt-get install -y python3 python3-pip python3-venv
+          sudo apt-get install -y firefox
 
-          # PostgreSQL 14+
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
-
-          # Redis 6+
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server
-
-          # Python 3.11+ (ubuntu-latest has >= 3.11)
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            python3 python3-pip python3-venv
-
-          # Firefox latest from Ubuntu repo
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
-
-      - name: Install Node.js 20 + Yarn 1.22+
+      - name: Install Node.js 20 + Yarn
         run: |
-          set -eux
-
-          # Node 20
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-
-          # Yarn 1.22+
-          sudo npm install -g yarn@1.22.22
+          sudo apt-get install -y nodejs
+          sudo npm i -g yarn@1.22.22
 
       - name: Install JDK 21 + Maven
         run: |
-          set -eux
-
-          # Install JDK 21 (Temurin)
           sudo apt-get update
-          sudo apt-get install -y gnupg
-          sudo mkdir -p /etc/apt/keyrings
-          wget -O- https://packages.adoptium.net/artifactory/api/gpg/key/public | \
-            sudo gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
-
-          echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" | \
-            sudo tee /etc/apt/sources.list.d/adoptium.list
-
-          sudo apt-get update
-          sudo apt-get install -y temurin-21-jdk
-
-          # Install Maven latest stable
           sudo apt-get install -y maven
-
-          # Confirm versions (for logs)
+          sudo apt-get install -y openjdk-21-jdk
           java -version
           mvn -version
 
       - name: Install Google Chrome
         run: |
-          set -eux
-
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
           rm google-chrome-stable_current_amd64.deb
-
-      - name: Install Google Antigravity
-        run: |
-          set -eux
-
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
-            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
-
-          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
-            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
-
-          sudo apt update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
 
       - name: Install Tailscale
         run: |
-          set -eux
-
           curl -fsSL https://tailscale.com/install.sh | sudo sh
           sudo systemctl enable --now tailscaled
 
-      - name: Bring Tailscale up (interactive login URL)
-        shell: bash
+      - name: Bring Tailscale up (Login URL mode)
         run: |
           set -eux
 
-          # Start Tailscale and capture login URL in logs
           sudo tailscale up \
-            --hostname="gh-ubuntu-kde-${GITHUB_RUN_ID}" \
-            --reset 2>&1 | tee /tmp/tailscale-up.log || true
+            --hostname="gh-xfce-${GITHUB_RUN_ID}" \
+            --reset 2>&1 | tee /tmp/ts.txt || true
 
           echo ""
           echo "===== TAILSCALE LOGIN ====="
-          # Try to print the login URL if present
-          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/tailscale-up.log || \
-            echo "No login URL found (maybe already authenticated)."
+          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/ts.txt || \
+            echo "No login URL found."
           echo "==========================="
           echo ""
 
-          # Wait for user to complete login & IP to appear
           TS_IP=""
           for i in $(seq 1 20); do
             TS_IP=$(tailscale ip -4 | head -n 1 || true)
             if [ -n "$TS_IP" ]; then
               break
             fi
-            echo "Waiting for Tailscale authentication... ($i/20)"
             sleep 6
           done
 
           if [ -z "$TS_IP" ]; then
-            echo "No Tailscale IPv4 address after waiting." >&2
+            echo "No Tailscale IPv4 address found!" >&2
             exit 1
           fi
 
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-          echo "Tailscale IP: $TS_IP"
 
-      - name: Verify XRDP is listening
-        run: |
-          set -eux
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-openbsd
-          nc -zv 127.0.0.1 3389
-
-      - name: Show connection details & keep machine alive
-        shell: bash
+      - name: Show RDP login details & keep alive
         run: |
           echo ""
-          echo "========== UBUNTU KDE RDP =========="
-          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "========== UBUNTU XFCE RDP =========="
+          echo "IP           : $TAILSCALE_IP"
           echo "User         : $DESKTOP_USER"
           echo "Password     : $DESKTOP_PASSWORD"
-          echo "Port         : 3389 (RDP)"
-          echo "===================================="
+          echo "Port         : 3389"
+          echo "====================================="
           echo ""
-          echo "Use any RDP client (Windows / Android / iOS)"
-          echo "and connect to:  ${TAILSCALE_IP}:3389"
-          echo "Login as user:  $DESKTOP_USER"
+          echo "Connect with:"
+          echo "xfce session login = OK"
           echo ""
 
           while true
           do
-            echo "[$(date)] KDE RDP session still running..."
+            echo "[$(date)] XFCE session running..."
             sleep 300
           done
