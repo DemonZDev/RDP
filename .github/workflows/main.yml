@@ -5,7 +5,7 @@ on:
 
 jobs:
   ubuntu-kde-rdp:
-    runs-on: ubuntu-24.04  # or: ubuntu-latest
+    runs-on: ubuntu-24.04   # or ubuntu-latest
     timeout-minutes: 360
 
     steps:
@@ -14,10 +14,13 @@ jobs:
           set -eux
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            kde-plasma-desktop xrdp xorg dbus-x11
 
-          # Small XRDP tweak (avoids cursor issues on some setups)
+          # Basic desktop stuff
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            kde-plasma-desktop xrdp xorg dbus-x11 \
+            software-properties-common curl wget gnupg lsb-release ca-certificates
+
+          # Make sure xrdp uses sane cursor settings
           if grep -q '^new_cursors=true' /etc/xrdp/xrdp.ini; then
             sudo sed -i 's/^new_cursors=true/new_cursors=false/' /etc/xrdp/xrdp.ini
           fi
@@ -25,16 +28,167 @@ jobs:
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
-      - name: Create RDP user with random password
+      - name: Create godhyena user with sudo
         run: |
           set -eux
 
-          USERNAME="rdp"
+          USERNAME="godhyena"
 
           if ! id "$USERNAME" >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash "$USERNAME"
           fi
 
+          PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
+          echo "$USERNAME:$PASSWORD" | sudo chpasswd
+
+          # sudo without password prompts (on this temporary runner it's fine)
+          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME" >/dev/null
+
+          sudo usermod -aG ssl-cert "$USERNAME" || true
+
+          echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
+          echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Configure KDE Plasma session for XRDP
+        run: |
+          set -eux
+
+          USERNAME="$DESKTOP_USER"
+
+          # Make KDE Plasma the session for xrdp
+          sudo -u "$USERNAME" bash -lc '
+            echo "startplasma-x11" > ~/.xsession
+
+            D=/usr/share/plasma:/usr/local/share:/usr/share:/var/lib/snapd/desktop
+            C=/etc/xdg/xdg-plasma:/etc/xdg
+            C=${C}:/usr/share/kubuntu-default-settings/kf5-settings
+
+            cat > ~/.xsessionrc <<EOF
+export XDG_SESSION_DESKTOP=KDE
+export XDG_DATA_DIRS=${D}
+export XDG_CONFIG_DIRS=${C}
+EOF
+          '
+
+          sudo systemctl restart xrdp
+
+      - name: Install dev stack (Docker, PostgreSQL, Redis, Python, Firefox)
+        run: |
+          set -eux
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+
+          # Docker 20.10+ (docker.io from Ubuntu repo is fine and recent)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+          sudo systemctl enable --now docker
+          sudo usermod -aG docker "$DESKTOP_USER" || true
+
+          # PostgreSQL 14+ (24.04 ships newer, still ok)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
+
+          # Redis 6+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server
+
+          # Python 3.11+ (24.04 default is >= 3.11)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            python3 python3-pip python3-venv
+
+          # Firefox
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
+
+      - name: Install Node.js 20 + Yarn 1.22+
+        run: |
+          set -eux
+
+          # NodeSource Node.js 20.x
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+          # Yarn 1.22+
+          sudo npm install -g yarn@1.22.22
+
+      - name: Install Google Chrome
+        run: |
+          set -eux
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./google-chrome-stable_current_amd64.deb
+          rm google-chrome-stable_current_amd64.deb
+
+      - name: Install Google Antigravity
+        run: |
+          set -eux
+
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
+
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
+            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+
+          sudo apt update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+
+      - name: Install Tailscale
+        run: |
+          set -eux
+
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo systemctl enable --now tailscaled
+
+      - name: Bring Tailscale up
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          set -eux
+
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "Missing TAILSCALE_AUTH_KEY secret" >&2
+            exit 1
+          fi
+
+          sudo tailscale up \
+            --authkey="${TS_AUTHKEY}" \
+            --hostname="gh-ubuntu-kde-${GITHUB_RUN_ID}" \
+            --reset
+
+          TS_IP=$(tailscale ip -4 | head -n 1 || true)
+
+          if [ -z "$TS_IP" ]; then
+            echo "No Tailscale IPv4 address" >&2
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "Tailscale IP: $TS_IP"
+
+      - name: Verify XRDP is listening
+        run: |
+          set -eux
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-openbsd
+          nc -zv 127.0.0.1 3389
+
+      - name: Show connection details & keep machine alive
+        run: |
+          set -eux
+
+          echo ""
+          echo "========== UBUNTU KDE RDP =========="
+          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "User         : $DESKTOP_USER"
+          echo "Password     : $DESKTOP_PASSWORD"
+          echo "Port         : 3389 (RDP)"
+          echo "===================================="
+          echo ""
+          echo "Use any RDP client (Windows / Android / iOS)"
+          echo "and connect to:  ${TAILSCALE_IP}:3389"
+          echo "Login as user:  $DESKTOP_USER"
+          echo ""
+
+          while true; do
+            echo "[$(date)] KDE RDP session still running..."
+            sleep 300
+          done
           PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
           echo "$USERNAME:$PASSWORD" | sudo chpasswd
 
