@@ -1,324 +1,113 @@
-name: Ubuntu XFCE RDP
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  ubuntu-xfce-rdp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-      - name: Install XFCE + XRDP
+      - name: Configure Core RDP Settings
         run: |
-          set -eux
-          sudo apt-get update
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          # Desktop + XRDP + Xorg
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xfce4-session \
-            xrdp xorg xorgxrdp dbus-x11
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-          sudo adduser xrdp ssl-cert || true
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
 
-          # Force xrdp to start XFCE instead of the default
-          sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak || true
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
-#!/bin/sh
-if [ -r /etc/profile ]; then
-  . /etc/profile
-fi
-export XDG_CONFIG_DIRS=/etc/xdg
-startxfce4
-EOF
-          sudo chmod +x /etc/xrdp/startwm.sh
-
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
-
-      - name: Create godhyena user with sudo
+      - name: Create RDP User with Secure Password
         run: |
-          set -eux
-          USERNAME="godhyena"
-
-          if ! id "$USERNAME" >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash "$USERNAME"
-          fi
-
-          PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
-          echo "$USERNAME:$PASSWORD" | sudo chpasswd
-          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME" >/dev/null
-          sudo usermod -aG ssl-cert "$USERNAME" || true
-
-          echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
-          echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
-
-      - name: Configure XFCE session for users
-        run: |
-          set -eux
-
-          # helper to create ~/.xsession for a user
-          make_session() {
-            U="$1"
-            if id "$U" >/dev/null 2>&1; then
-              sudo -u "$U" bash -lc 'printf "%s\n" "#!/bin/bash" "export XDG_CONFIG_DIRS=/etc/xdg" "startxfce4" > ~/.xsession && chmod +x ~/.xsession'
-            fi
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
           }
-
-          make_session runner
-          make_session "$DESKTOP_USER"
-
-      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox, Docker group fix)
-        run: |
-          set -eux
-          sudo apt-get update
-
-          # docker group for non-root usage
-          if getent group docker >/dev/null 2>&1; then
-            sudo usermod -aG docker "$DESKTOP_USER" || true
-          fi
-
-          sudo apt-get install -y postgresql postgresql-contrib
-          sudo apt-get install -y redis-server
-          sudo apt-get install -y python3 python3-pip python3-venv
-          sudo apt-get install -y firefox
-
-      - name: Install Node.js 20 + Yarn
-        run: |
-          set -eux
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          sudo npm i -g yarn@1.22.22
-
-      - name: Install JDK 21 + Maven
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y openjdk-21-jdk maven
-          java -version
-          mvn -version
-
-      - name: Install Google Chrome
-        run: |
-          set -eux
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-          rm google-chrome-stable_current_amd64.deb
-
-      - name: Install Google Antigravity
-        run: |
-          set -eux
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
-            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
-
-          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
-            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
-
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
 
       - name: Install Tailscale
         run: |
-          set -eux
-          curl -fsSL https://tailscale.com/install.sh | sudo sh
-          sudo systemctl enable --now tailscaled
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: Bring Tailscale up (Login URL mode)
+      - name: Establish Tailscale Connection
         run: |
-          set -eux
-
-          sudo tailscale up \
-            --hostname="gh-xfce-${GITHUB_RUN_ID}" \
-            --reset 2>&1 | tee /tmp/ts.txt || true
-
-          echo ""
-          echo "===== TAILSCALE LOGIN ====="
-          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/ts.txt || \
-            echo "No login URL found."
-          echo "==========================="
-          echo ""
-
-          TS_IP=""
-          for i in $(seq 1 20); do
-            TS_IP=$(tailscale ip -4 | head -n 1 || true)
-            if [ -n "$TS_IP" ]; then
-              break
-            fi
-            sleep 6
-          done
-
-          if [ -z "$TS_IP" ]; then
-            echo "No Tailscale IPv4 address found!" >&2
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-
-      - name: Show RDP login details & keep alive
-        run: |
-          echo ""
-          echo "========== UBUNTU XFCE RDP =========="
-          echo "IP           : $TAILSCALE_IP"
-          echo "User         : $DESKTOP_USER"
-          echo "Password     : $DESKTOP_PASSWORD"
-          echo "Port         : 3389"
-          echo "====================================="
-          echo ""
-          echo "Connect with any RDP client to:"
-          echo "  ${TAILSCALE_IP}:3389 as ${DESKTOP_USER}"
-          echo ""
-
-          while true
-          do
-            echo "[$(date)] XFCE session running..."
-            sleep 300
-          done          sudo chmod +x /etc/xrdp/startwm.sh
-
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
-
-      - name: Create godhyena user with sudo
-        run: |
-          set -eux
-          USERNAME="godhyena"
-
-          if ! id "$USERNAME" >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash "$USERNAME"
-          fi
-
-          PASSWORD=$(tr -dc 'A-Za-z0-9@#%+=_:./-' < /dev/urandom | head -c 20)
-          echo "$USERNAME:$PASSWORD" | sudo chpasswd
-          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME" >/dev/null
-          sudo usermod -aG ssl-cert "$USERNAME" || true
-
-          echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
-          echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
-
-      - name: Configure XFCE session for users
-        run: |
-          set -eux
-
-          make_session() {
-            local U="$1"
-            if id "$U" >/dev/null 2>&1; then
-              sudo -u "$U" bash -lc 'cat > ~/.xsession <<EOF
-#!/bin/bash
-export XDG_CONFIG_DIRS=/etc/xdg
-startxfce4
-EOF
-chmod +x ~/.xsession
-'
-            fi
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-
-          # Ensure both runner and godhyena have a correct session script
-          make_session "runner"
-          make_session "$DESKTOP_USER"
-
-      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox, Docker group fix)
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
         run: |
-          set -eux
-          sudo apt-get update
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-          # hook docker group
-          if getent group docker >/dev/null 2>&1; then
-            sudo usermod -aG docker "$DESKTOP_USER" || true
-          fi
-
-          sudo apt-get install -y postgresql postgresql-contrib
-          sudo apt-get install -y redis-server
-          sudo apt-get install -y python3 python3-pip python3-venv
-          sudo apt-get install -y firefox
-
-      - name: Install Node.js 20 + Yarn
+      - name: Maintain Connection
         run: |
-          set -eux
-          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-          sudo apt-get install -y nodejs
-          sudo npm i -g yarn@1.22.22
-
-      - name: Install JDK 21 + Maven
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y openjdk-21-jdk maven
-          java -version
-          mvn -version
-
-      - name: Install Google Chrome
-        run: |
-          set -eux
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-          rm google-chrome-stable_current_amd64.deb
-
-      - name: Install Google Antigravity
-        run: |
-          set -eux
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
-            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
-
-          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
-            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
-
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
-
-      - name: Install Tailscale
-        run: |
-          set -eux
-          curl -fsSL https://tailscale.com/install.sh | sudo sh
-          sudo systemctl enable --now tailscaled
-
-      - name: Bring Tailscale up (Login URL mode)
-        run: |
-          set -eux
-
-          sudo tailscale up \
-            --hostname="gh-xfce-${GITHUB_RUN_ID}" \
-            --reset 2>&1 | tee /tmp/ts.txt || true
-
-          echo ""
-          echo "===== TAILSCALE LOGIN ====="
-          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/ts.txt || \
-            echo "No login URL found."
-          echo "==========================="
-          echo ""
-
-          TS_IP=""
-          for i in $(seq 1 20); do
-            TS_IP=$(tailscale ip -4 | head -n 1 || true)
-            if [ -n "$TS_IP" ]; then
-              break
-            fi
-            sleep 6
-          done
-
-          if [ -z "$TS_IP" ]; then
-            echo "No Tailscale IPv4 address found!" >&2
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-
-      - name: Show RDP login details & keep alive
-        run: |
-          echo ""
-          echo "========== UBUNTU XFCE RDP =========="
-          echo "IP           : $TAILSCALE_IP"
-          echo "User         : $DESKTOP_USER"
-          echo "Password     : $DESKTOP_PASSWORD"
-          echo "Port         : 3389"
-          echo "====================================="
-          echo ""
-          echo "Connect with any RDP client to:"
-          echo "  ${TAILSCALE_IP}:3389 as ${DESKTOP_USER}"
-          echo ""
-
-          while true
-          do
-            echo "[$(date)] XFCE session running..."
-            sleep 300
-          done
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
