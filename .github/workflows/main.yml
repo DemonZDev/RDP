@@ -75,12 +75,23 @@ jobs:
       - name: Fix KDE config permissions
         run: |
           set -eux
-          # Make sure ~/.config/ksplashrc exists and is writable
-          for U in "$DESKTOP_USER" runner; do
-            if id "$U" >/dev/null 2>&1; then
-              sudo -u "$U" bash -lc 'mkdir -p ~/.config && touch ~/.config/ksplashrc'
-            fi
-          done
+
+          # Make sure ksplashrc exists and is writable for both runner and godhyena
+          # 1) runner (this is the one KDE is complaining about in your screenshot)
+          if id runner >/dev/null 2>&1; then
+            sudo mkdir -p /home/runner/.config
+            sudo touch /home/runner/.config/ksplashrc
+            sudo chown runner:runner /home/runner/.config /home/runner/.config/ksplashrc
+            sudo chmod 666 /home/runner/.config/ksplashrc
+          fi
+
+          # 2) desktop user (godhyena)
+          if id "$DESKTOP_USER" >/dev/null 2>&1; then
+            sudo mkdir -p "/home/$DESKTOP_USER/.config"
+            sudo touch "/home/$DESKTOP_USER/.config/ksplashrc"
+            sudo chown "$DESKTOP_USER:$DESKTOP_USER" "/home/$DESKTOP_USER/.config" "/home/$DESKTOP_USER/.config/ksplashrc"
+            sudo chmod 666 "/home/$DESKTOP_USER/.config/ksplashrc"
+          fi
 
       - name: Install dev stack (PostgreSQL, Redis, Python, Firefox) + hook Docker user
         run: |
