@@ -72,16 +72,17 @@ jobs:
 
           sudo systemctl restart xrdp
 
-      - name: Install dev stack (Docker, PostgreSQL, Redis, Python, Firefox)
+      - name: Install dev stack (PostgreSQL, Redis, Python, Firefox) + hook Docker user
         run: |
           set -eux
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
 
-          # Docker 20.10+
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
-          sudo systemctl enable --now docker
-          sudo usermod -aG docker "$DESKTOP_USER" || true
+          # Docker is ALREADY installed on GitHub runners.
+          # Just add user to docker group so it can run docker without sudo.
+          if getent group docker >/dev/null 2>&1; then
+            sudo usermod -aG docker "$DESKTOP_USER" || true
+          fi
 
           # PostgreSQL 14+
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
@@ -127,7 +128,7 @@ jobs:
           # Install Maven latest stable
           sudo apt-get install -y maven
 
-          # Confirm versions
+          # Confirm versions (for logs)
           java -version
           mvn -version
 
