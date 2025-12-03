@@ -49,39 +49,34 @@ jobs:
           sudo mkdir -p "$HOME_DIR"
           sudo chown "$USERNAME:$USERNAME" "$HOME_DIR"
 
-          # Create .vnc dir as the user
-          sudo -u "$USERNAME" mkdir -p "$HOME_DIR/.vnc"
-
           # Set VNC password (non-interactive) AS USER
           sudo -u "$USERNAME" bash -lc "printf '%s\n%s\nn\n' '$VNC_PASS' '$VNC_PASS' | vncpasswd"
 
           # First start VNC as the user to generate default config
-          sudo -u "$USERNAME" vncserver || true
+          sudo -u "$USERNAME" USER=godhyena vncserver || true
 
           # Kill that first session
           sudo -u "$USERNAME" vncserver -kill :1 || true
 
-          # Backup old xstartup if present
-          if sudo -u "$USERNAME" test -f "$HOME_DIR/.vnc/xstartup"; then
-            sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
-          fi
+          # Backup old xstartup
+          sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
 
           # Write XFCE xstartup (no extra magic, just startxfce4)
           cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
           #!/bin/bash
-          xrdb "$HOME/.Xresources"
-          startxfce4 &
+          xrdb $HOME/.Xresources
+          export XDG_SESSION_TYPE=x11
+          export XDG_CURRENT_DESKTOP=XFCE
+          export DESKTOP_SESSION=xfce
+          export GSETTINGS_BACKEND=dconf
+          dbus-launch startxfce4 &
           EOF
 
           # Make xstartup executable
-          sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
+          sudo -u "$USERNAME" chmod +x ~/.vnc/xstartup
 
           # Start VNC again as that user on :1 (this is the real session)
-          sudo -u "$USERNAME" vncserver :1
-
-          # Start noVNC on :6080 mapping to :5901
-          sudo nohup websockify --web /usr/share/novnc/ 0.0.0.0:6080 localhost:5901 \
-            >/tmp/novnc.log 2>&1 &
+          sudo -u "$USERNAME" USER=godhyena vncserver
 
       - name: Install Firefox 145.0.2
         run: |
