@@ -59,16 +59,16 @@ jobs:
             sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
           fi
 
-          # Write MATE xstartup (no cursed nested heredoc)
+          # Write MATE xstartup (properly indented heredoc)
           cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
-#!/bin/bash
-xrdb "$HOME/.Xresources"
-export XDG_SESSION_TYPE=x11
-export XDG_CURRENT_DESKTOP=MATE
-export DESKTOP_SESSION=mate
-export GSETTINGS_BACKEND=dconf
-dbus-launch mate-session &
-EOF
+          #!/bin/bash
+          xrdb "$HOME/.Xresources"
+          export XDG_SESSION_TYPE=x11
+          export XDG_CURRENT_DESKTOP=MATE
+          export DESKTOP_SESSION=mate
+          export GSETTINGS_BACKEND=dconf
+          dbus-launch mate-session &
+          EOF
 
           sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
 
