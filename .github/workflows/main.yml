@@ -1,113 +1,283 @@
-name: RDP
+name: Ubuntu MATE TigerVNC RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  ubuntu-mate-vnc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Create GodHyena user with sudo
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          set -eux
+          USERNAME="GodHyena"
+          PASSWORD="Rupesh"
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          if ! id "$USERNAME" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash "$USERNAME"
+          fi
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
+          echo "$USERNAME:$PASSWORD" | sudo chpasswd
+          sudo usermod -aG sudo "$USERNAME" || true
 
-      - name: Create RDP User with Secure Password
+          echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
+          echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Install MATE desktop + TigerVNC + noVNC
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          set -eux
+          sudo apt-get update
+          sudo apt-get upgrade -y
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ubuntu-mate-desktop mate-session-manager \
+            dbus dbus-x11 \
+            tigervnc-standalone-server tigervnc-common \
+            novnc python3-websockify python3-numpy \
+            htop nano
+
+      - name: Configure TigerVNC for GodHyena
+        run: |
+          set -eux
+          USERNAME="$DESKTOP_USER"
+          VNC_PASS="Rupesh"
+          HOME_DIR="/home/$USERNAME"
+
+          sudo -u "$USERNAME" mkdir -p "$HOME_DIR/.vnc"
+
+          # Set VNC password (non-interactive)
+          sudo -u "$USERNAME" bash -lc "printf '%s\n%s\nn\n' '$VNC_PASS' '$VNC_PASS' | vncpasswd"
+
+          # Initial start to generate config, then kill
+          sudo -u "$USERNAME" tigervncserver || true
+          sudo -u "$USERNAME" tigervncserver -kill :1 || true
+
+          # Replace xstartup with MATE session
+          if sudo -u "$USERNAME" test -f "$HOME_DIR/.vnc/xstartup"; then
+            sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
+          fi
+
+          sudo -u "$USERNAME" bash -lc 'cat > ~/.vnc/xstartup << "EOF"
+#!/bin/bash
+xrdb "$HOME/.Xresources"
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=MATE
+export DESKTOP_SESSION=mate
+export GSETTINGS_BACKEND=dconf
+dbus-launch mate-session &
+EOF
+chmod +x ~/.vnc/xstartup
+'
+
+          # Start VNC on :1 (5901)
+          sudo -u "$USERNAME" tigervncserver :1
+
+          # Start noVNC on :6080 mapping to :5901
+          sudo nohup websockify --web /usr/share/novnc/ 0.0.0.0:6080 localhost:5901 \
+            >/tmp/novnc.log 2>&1 &
+
+      - name: Install Firefox 145.0.2
+        run: |
+          set -eux
+          sudo apt-get remove -y firefox || true
+
+          cd /tmp
+          wget -q https://ftp.mozilla.org/pub/firefox/releases/145.0.2/linux-x86_64/en-US/firefox-145.0.2.tar.bz2
+          sudo mkdir -p /opt/firefox-145.0.2
+          sudo tar -xjf firefox-145.0.2.tar.bz2 -C /opt/firefox-145.0.2 --strip-components=1
+          rm firefox-145.0.2.tar.bz2
+
+          sudo ln -sf /opt/firefox-145.0.2/firefox /usr/local/bin/firefox
+
+      - name: Install Chrome 143.0.7499.40
+        run: |
+          set -eux
+          cd /tmp
+          wget -q https://storage.googleapis.com/chrome-for-testing-public/143.0.7499.40/linux64/chrome-linux64.zip
+          sudo mkdir -p /opt/chrome-143.0.7499.40
+          sudo apt-get install -y unzip
+          sudo unzip -q chrome-linux64.zip -d /opt/chrome-143.0.7499.40
+          rm chrome-linux64.zip
+
+          # binary is under chrome-linux64/chrome
+          sudo ln -sf /opt/chrome-143.0.7499.40/chrome-linux64/chrome /usr/local/bin/google-chrome
+
+      - name: Install Google Antigravity
+        run: |
+          set -eux
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/antigravity-repo-key.gpg
+
+          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | \
+            sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+
+      - name: Install PostgreSQL 18.1 (PGDG)
+        run: |
+          set -eux
+
+          # PGDG repo
+          sudo apt-get install -y wget gnupg
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+            sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "deb http://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" | \
+            sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18
+
+      - name: Install Docker 29.x + Docker Compose 2.40.3
+        run: |
+          set -eux
+
+          # Remove conflicting packages if any
+          sudo apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 \
+            podman-docker containerd runc || true
+
+          # Docker APT repo
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+            sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin
+
+          # Pin Compose plugin to 2.40.3
+          sudo mkdir -p /usr/lib/docker/cli-plugins
+          curl -L "https://github.com/docker/compose/releases/download/v2.40.3/docker-compose-linux-x86_64" \
+            -o docker-compose
+          chmod +x docker-compose
+          sudo mv docker-compose /usr/lib/docker/cli-plugins/docker-compose
+
+          # Allow GodHyena to use docker
+          sudo usermod -aG docker "$DESKTOP_USER" || true
+
+      - name: Install Node.js 25.2.1 + Yarn 4.12.0
+        run: |
+          set -eux
+          cd /tmp
+
+          wget -q https://nodejs.org/dist/v25.2.1/node-v25.2.1-linux-x64.tar.xz
+          sudo mkdir -p /opt/node-v25.2.1
+          sudo tar -xJf node-v25.2.1-linux-x64.tar.xz -C /opt/node-v25.2.1 --strip-components=1
+          rm node-v25.2.1-linux-x64.tar.xz
+
+          echo 'export PATH=/opt/node-v25.2.1/bin:$PATH' | sudo tee /etc/profile.d/node-25.sh >/dev/null
+          export PATH=/opt/node-v25.2.1/bin:$PATH
+
+          # Enable Corepack and pin Yarn 4.12.0
+          corepack enable
+          corepack prepare yarn@4.12.0 --activate
+
+      - name: Install Python 3.14.0 + pip 25.3
+        run: |
+          set -eux
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libreadline-dev libsqlite3-dev libgdbm-dev libdb5.3-dev \
+            libbz2-dev libexpat1-dev liblzma-dev tk-dev libffi-dev \
+            uuid-dev
+
+          cd /tmp
+          wget -q https://www.python.org/ftp/python/3.14.0/Python-3.14.0.tgz
+          tar -xzf Python-3.14.0.tgz
+          cd Python-3.14.0
+
+          ./configure --enable-optimizations
+          make -j"$(nproc)"
+          sudo make altinstall  # installs python3.14
+
+          python3.14 -m ensurepip
+          python3.14 -m pip install --upgrade "pip==25.3"
+
+      - name: Install Java 21 + Maven 3.9.11
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jdk
+
+          cd /tmp
+          wget -q https://downloads.apache.org/maven/maven-3/3.9.11/binaries/apache-maven-3.9.11-bin.tar.gz
+          sudo mkdir -p /opt/maven-3.9.11
+          sudo tar -xzf apache-maven-3.9.11-bin.tar.gz -C /opt/maven-3.9.11 --strip-components=1
+          rm apache-maven-3.9.11-bin.tar.gz
+
+          echo 'export MAVEN_HOME=/opt/maven-3.9.11' | sudo tee /etc/profile.d/maven.sh >/dev/null
+          echo 'export PATH=$MAVEN_HOME/bin:$PATH' | sudo tee -a /etc/profile.d/maven.sh >/dev/null
+          export MAVEN_HOME=/opt/maven-3.9.11
+          export PATH=$MAVEN_HOME/bin:$PATH
+
+          mvn -version
+          java -version
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          set -eux
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo systemctl enable --now tailscaled
 
-      - name: Establish Tailscale Connection
+      - name: Bring Tailscale up (login URL mode)
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          set -eux
 
-      - name: Maintain Connection
+          sudo tailscale up \
+            --hostname="gh-mate-vnc-${GITHUB_RUN_ID}" \
+            --reset 2>&1 | tee /tmp/ts.txt || true
+
+          echo ""
+          echo "===== TAILSCALE LOGIN ====="
+          grep -Eo 'https://login.tailscale.com/[A-Za-z0-9/_-]*' /tmp/ts.txt || \
+            echo "No login URL found."
+          echo "==========================="
+          echo ""
+
+          TS_IP=""
+          for i in $(seq 1 20); do
+            TS_IP=$(tailscale ip -4 | head -n 1 || true)
+            if [ -n "$TS_IP" ]; then
+              break
+            fi
+            sleep 6
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "No Tailscale IPv4 address found!" >&2
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      - name: Show VNC details & keep alive
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
-          
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+          echo ""
+          echo "====== UBUNTU MATE + TIGERVNC ======"
+          echo "Tailscale IP : $TAILSCALE_IP"
+          echo "User         : $DESKTOP_USER"
+          echo "User Pass    : $DESKTOP_PASSWORD"
+          echo "VNC Display  : :1"
+          echo "VNC Port     : 5901"
+          echo "VNC Pass     : Rupesh"
+          echo "noVNC URL    : http://$TAILSCALE_IP:6080/vnc.html"
+          echo "===================================="
+          echo ""
+
+          while true
+          do
+            echo "[$(date)] MATE VNC session running..."
+            sleep 300
+          done
