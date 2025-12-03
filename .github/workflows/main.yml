@@ -54,12 +54,13 @@ jobs:
           sudo -u "$USERNAME" tigervncserver || true
           sudo -u "$USERNAME" tigervncserver -kill :1 || true
 
-          # Replace xstartup with MATE session
+          # Backup old xstartup if present
           if sudo -u "$USERNAME" test -f "$HOME_DIR/.vnc/xstartup"; then
             sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
           fi
 
-          sudo -u "$USERNAME" bash -lc 'cat > ~/.vnc/xstartup << "EOF"
+          # Write MATE xstartup (no cursed nested heredoc)
+          cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
 #!/bin/bash
 xrdb "$HOME/.Xresources"
 export XDG_SESSION_TYPE=x11
@@ -68,8 +69,8 @@ export DESKTOP_SESSION=mate
 export GSETTINGS_BACKEND=dconf
 dbus-launch mate-session &
 EOF
-chmod +x ~/.vnc/xstartup
-'
+
+          sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
 
           # Start VNC on :1 (5901)
           sudo -u "$USERNAME" tigervncserver :1
