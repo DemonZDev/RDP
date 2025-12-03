@@ -43,21 +43,24 @@ jobs:
           set -eux
           USERNAME="$DESKTOP_USER"
           VNC_PASS="Rupesh"
+          HOME_DIR="/home/$USERNAME"
+
+          # Create .vnc dir as the user
+          sudo -u "$USERNAME" mkdir -p "$HOME_DIR/.vnc"
 
           # Set VNC password (non-interactive) AS USER
-          sudo bash -lc "printf '%s\n%s\nn\n' '$VNC_PASS' '$VNC_PASS' | vncpasswd"
+          sudo -u "$USERNAME" bash -lc "echo '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
+          sudo -u "$USERNAME" chmod 600 "$HOME_DIR/.vnc/passwd"
 
           # First start VNC as the user to generate default config
-          USER=godhyena vncserver
-
-          # Kill that first session
-          sudo vncserver -kill :1
+          sudo -u "$USERNAME" vncserver :1 || true
+          sudo -u "$USERNAME" vncserver -kill :1 || true
 
           # Backup old xstartup
-          sudo mv ~/.vnc/xstartup ~/.vnc/xstartup.bak
+          sudo -u "$USERNAME" rm -rf "$HOME_DIR/.vnc/xstartup"
 
-          # Write XFCE xstartup (no extra magic, just startxfce4)
-          cat << 'EOF'
+          # Write XFCE xstartup
+          cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
           #!/bin/bash
           xrdb $HOME/.Xresources
           export XDG_SESSION_TYPE=x11
@@ -68,10 +71,10 @@ jobs:
           EOF
 
           # Make xstartup executable
-          sudo chmod +x ~/.vnc/xstartup
+          sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
 
-          # Start VNC again as that user on :1 (this is the real session)
-          USER=godhyena vncserver
+          # Start VNC again
+          sudo -u "$USERNAME" vncserver
 
       - name: Install Firefox 145.0.2
         run: |
