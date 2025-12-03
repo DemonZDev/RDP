@@ -1,10 +1,10 @@
-name: Ubuntu MATE TigerVNC RDP
+name: Ubuntu XFCE TigerVNC RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  ubuntu-mate-vnc:
+  ubuntu-xfce-vnc:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -25,55 +25,59 @@ jobs:
           echo "DESKTOP_USER=$USERNAME" >> "$GITHUB_ENV"
           echo "DESKTOP_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Install MATE desktop + TigerVNC + noVNC
+      - name: Install XFCE desktop + TigerVNC + noVNC
         run: |
           set -eux
           sudo apt-get update
           sudo apt-get upgrade -y
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            ubuntu-mate-desktop mate-session-manager \
+            xfce4 xfce4-goodies \
             dbus dbus-x11 \
             tigervnc-standalone-server tigervnc-common \
             novnc python3-websockify python3-numpy \
             htop nano
 
-      - name: Configure TigerVNC for GodHyena
+      - name: Configure TigerVNC for GodHyena (XFCE, user flow)
         run: |
           set -eux
           USERNAME="$DESKTOP_USER"
           VNC_PASS="Rupesh"
           HOME_DIR="/home/$USERNAME"
 
+          # Make sure home exists
+          sudo mkdir -p "$HOME_DIR"
+          sudo chown "$USERNAME:$USERNAME" "$HOME_DIR"
+
+          # Create .vnc dir as the user
           sudo -u "$USERNAME" mkdir -p "$HOME_DIR/.vnc"
 
-          # Set VNC password (non-interactive)
+          # Set VNC password (non-interactive) AS USER
           sudo -u "$USERNAME" bash -lc "printf '%s\n%s\nn\n' '$VNC_PASS' '$VNC_PASS' | vncpasswd"
 
-          # Initial start to generate config, then kill
-          sudo -u "$USERNAME" tigervncserver || true
-          sudo -u "$USERNAME" tigervncserver -kill :1 || true
+          # First start VNC as the user to generate default config
+          sudo -u "$USERNAME" vncserver || true
+
+          # Kill that first session
+          sudo -u "$USERNAME" vncserver -kill :1 || true
 
           # Backup old xstartup if present
           if sudo -u "$USERNAME" test -f "$HOME_DIR/.vnc/xstartup"; then
             sudo -u "$USERNAME" mv "$HOME_DIR/.vnc/xstartup" "$HOME_DIR/.vnc/xstartup.bak"
           fi
 
-          # Write MATE xstartup (properly indented heredoc)
+          # Write XFCE xstartup (no extra magic, just startxfce4)
           cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
           #!/bin/bash
           xrdb "$HOME/.Xresources"
-          export XDG_SESSION_TYPE=x11
-          export XDG_CURRENT_DESKTOP=MATE
-          export DESKTOP_SESSION=mate
-          export GSETTINGS_BACKEND=dconf
-          dbus-launch mate-session &
+          startxfce4 &
           EOF
 
+          # Make xstartup executable
           sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
 
-          # Start VNC on :1 (5901)
-          sudo -u "$USERNAME" tigervncserver :1
+          # Start VNC again as that user on :1 (this is the real session)
+          sudo -u "$USERNAME" vncserver :1
 
           # Start noVNC on :6080 mapping to :5901
           sudo nohup websockify --web /usr/share/novnc/ 0.0.0.0:6080 localhost:5901 \
@@ -237,7 +241,7 @@ jobs:
           set -eux
 
           sudo tailscale up \
-            --hostname="gh-mate-vnc-${GITHUB_RUN_ID}" \
+            --hostname="gh-xfce-vnc-${GITHUB_RUN_ID}" \
             --reset 2>&1 | tee /tmp/ts.txt || true
 
           echo ""
@@ -266,7 +270,7 @@ jobs:
       - name: Show VNC details & keep alive
         run: |
           echo ""
-          echo "====== UBUNTU MATE + TIGERVNC ======"
+          echo "====== UBUNTU XFCE + TIGERVNC ======"
           echo "Tailscale IP : $TAILSCALE_IP"
           echo "User         : $DESKTOP_USER"
           echo "User Pass    : $DESKTOP_PASSWORD"
@@ -279,6 +283,6 @@ jobs:
 
           while true
           do
-            echo "[$(date)] MATE VNC session running..."
+            echo "[$(date)] XFCE VNC session running..."
             sleep 300
           done
