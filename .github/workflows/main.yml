@@ -41,26 +41,24 @@ jobs:
       - name: Configure TigerVNC for GodHyena (XFCE, user flow)
         run: |
           set -eux
-          USERNAME="$DESKTOP_USER"
           VNC_PASS="Rupesh"
-          HOME_DIR="/home/$USERNAME"
 
           # Create .vnc dir as the user
-          sudo -u "$USERNAME" mkdir -p "$HOME_DIR/.vnc"
+          sudo -u godhyena mkdir -p /home/godhyena/.vnc
 
           # Set VNC password (non-interactive) AS USER
-          sudo -u "$USERNAME" bash -lc "echo '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
-          sudo -u "$USERNAME" chmod 600 "$HOME_DIR/.vnc/passwd"
+          sudo -u godhyena bash -lc "echo Rupesh | vncpasswd -f > /home/godhyena/.vnc/passwd"
+          sudo -u godhyena chmod 600 /home/godhyena/.vnc/passwd
 
           # First start VNC as the user to generate default config
-          sudo -u "$USERNAME" vncserver :1 || true
-          sudo -u "$USERNAME" vncserver -kill :1 || true
+          USER=godhyena vncserver :1 || true
+          USER=godhyena vncserver -kill :1 || true
 
           # Backup old xstartup
-          sudo -u "$USERNAME" rm -rf "$HOME_DIR/.vnc/xstartup"
+          sudo -u godhyena mv /home/godhyena/.vnc/xstartup /home/godhyena/.vnc/xstartup.bak || true
 
           # Write XFCE xstartup
-          cat << 'EOF' | sudo -u "$USERNAME" tee "$HOME_DIR/.vnc/xstartup" >/dev/null
+          cat << 'EOF' | sudo -u godhyena tee /home/godhyena/.vnc/xstartup >/dev/null
           #!/bin/bash
           xrdb $HOME/.Xresources
           export XDG_SESSION_TYPE=x11
@@ -71,10 +69,10 @@ jobs:
           EOF
 
           # Make xstartup executable
-          sudo -u "$USERNAME" chmod +x "$HOME_DIR/.vnc/xstartup"
+          sudo -u godhyena chmod +x /home/godhyena/.vnc/xstartup
 
           # Start VNC again
-          sudo -u "$USERNAME" vncserver
+          USER=godhyena vncserver :1
 
       - name: Install Firefox 145.0.2
         run: |
